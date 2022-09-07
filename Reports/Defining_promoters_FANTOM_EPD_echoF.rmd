@@ -1,0 +1,185 @@
+---
+title: "Defining promoters"
+author: "Martin Iungman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+``` {r libraries}
+library(rtracklayer)
+library(stringi)
+library(tidyverse)
+library(BSgenome.Hsapiens.UCSC.hg38)
+hg38<-BSgenome.Hsapiens.UCSC.hg38
+```
+
+Este informe incluye el analisis de los true TSS de FANTOM5 y los promotores de la base de datos EPD.   
+  
+  
+# FANTOM5 True TSS
+
+Esta sección toma el script de promoter_id.R, para identificar los "true TSS clusters" propuestos por FANTOM5. \
+Luego toma el script distances.R para estimar las distancias entre los clusters dentro de cada gen
+
+### Pre processing
+
+El archivo BED de FANTOM esta bajo el nombre "TSS_human.bed" \
+
+```{r initiate}
+human_tss_gr <- import.bed("Data/TSS_human.bed") # importa un archivo bed y lo graba como GRanges
+gene_score_2p <- tibble(
+  name = mcols(human_tss_gr)$name,
+  gene = stri_replace_last_regex(str = mcols(human_tss_gr)$name, pattern = ",\\d.\\d\\d\\d\\d", replacement = ""),
+  score = as.numeric(stri_extract_last_regex(str = mcols(human_tss_gr)$name, pattern = "\\d.\\d\\d\\d\\d"))
+)
+str_glue("Contiene {nrow(gene_score_2p)} Ranges totales.")
+gene_score_2p <- filter(gene_score_2p, score >= 0.228)
+str_glue("De los cuales  {nrow(gene_score_2p)} superan el umbral de score 0.228 propuesto por FANTOM5 para asignar los True TSS.")
+gene_names <- str_split(gene_score_2p$gene, ",") 
+gene_names_separated <- map(gene_names, str_split, "@")
+all_genes <- unlist(gene_names_separated) %>%
+  matrix(ncol = 2, byrow = T)
+all_genes <- unique(all_genes[,2]) %>% tibble::enframe()
+names(all_genes) <- c("id","name")
+str_glue("Estos ultimos están asociados a {nrow(all_genes)} elementtos génicos (genes o transcriptos)")
+head(all_genes)
+print("En algunos casos está asociado a gene symbol y otros a ID de transcripto. Lo queremos unificar")
+```
+
+Descargo los IDs de ENSEMBL (en archivo ensembl_genes_grch37.txt descargado por Biomart) para unificar nomenclatura.
+```{r ensembl}
+ENS_txs <- read_tsv(file="Data/ensembl_genes_grch37.txt",col_types = "cccf")
+names(ENS_txs) <- c("gene_id","tx_id","gene_symbol", "chr")
+str_glue("Contiene {nrow(ENS_txs)} transcriptos y  {length(unique(ENS_txs$gene_symbol))} gene symbols distintos")
+head(ENS_txs)
+```
+
+Que true TSS estan asociados a un gene symbol? Y cuales a un transcript ID?
+``` {r assign_ids}
+symbol_idx <- which(all_genes$name %in% ENS_txs$gene_symbol)
+tx_idx <- which(all_genes$name %in% ENS_txs$tx_id)
+str_glue("De lo los {nrow(all_genes)} elementos genicos asociados a True TSS, {length(symbol_idx)} asociados a gene_id y {length(tx_idx)} asociados a transcript ID")
+all_genes[tx_idx,"gene_symbol"] <- ENS_txs %>%
+  select(tx_id, gene_symbol) %>%
+  left_join(all_genes[tx_idx,], ., by = c("name" = "tx_id")) %>%
+  select(gene_symbol)
+
+all_genes[symbol_idx,"gene_symbol"] <- all_genes[symbol_idx,"name"]
+
+all_genes <- ENS_txs %>%
+  select(gene_symbol, gene_id) %>%
+  distinct() %>%
+  left_join(all_genes, .)
+gene_names_matrix <- str_split(gene_score_2p$gene, ",", simplify = T) 
+gene_names_matrix <- gsub(".*@","",gene_names_matrix) %>% as_tibble()
+colnames(gene_names_matrix) <- paste0("gene_",1:ncol(gene_names_matrix))
+gene_names_matrix <- select(gene_score_2p,name) %>% bind_cols(gene_names_matrix)
+gene_names_long <- gene_names_matrix %>%
+  rename(cluster_id="name") %>%
+  pivot_longer(-cluster_id, values_to = "genes") %>%
+  select(-name)
+gene_names_long <- gene_names_long %>%
+  filter(!genes=="")
+gene_names_long <- gene_names_long %>%
+  left_join(all_genes, by = c("genes" = "name"))
+
+clusters_selected_genes <- gene_names_long %>%
+  filter(!is.na(gene_id)) %>%
+  select(-genes,-id) %>%
+  distinct()
+str_glue("Tenemos ahora {length(unique(clusters_selected_genes$cluster_id))} cluster_id distintos, con {length(unique(clusters_selected_genes$gene_id))} gene_ids y 
+{length(unique(clusters_selected_genes$gene_symbol))} gene_symbol. Hay una diferencia entre gene_id y gene_symbol porque hay casos en los que un ID esta asignado a varios Symbol y viceversa. ")
+h37_tss_selected_gr <- subset(human_tss_gr, name %in% clusters_selected_genes$cluster_id)
+clusters_selected_genes %>%
+  group_by(gene_symbol, gene_id) %>%
+  mutate(Prom = 1:n()) -> clusters_selected_genes
+
+```
+### Numero de promotores por gen
+
+```{r n_prom}
+clusters_selected_genes%>%group_by(gene_symbol)%>%summarise(n_prom=n())%>%summary()
+print("se ve claramente un outlier al menos... 8800 son muchos promotores. Veamos a quien corresponden")
+clusters_selected_genes%>%group_by(gene_symbol)%>%summarise(n_prom=n())%>%arrange(desc(n_prom))%>%head()
+print("Ademas de Y_RNA, snoU13 tambien tiene enorme cantidad de promotores. Los voy a excluir")
+clusters_selected_genes<-clusters_selected_genes%>%filter(!gene_symbol%in%c("Y_RNA","snoU13"))
+str_glue("Finalmente tenemos {length(unique(clusters_selected_genes$cluster_id))} cluster_id distintos, con {length(unique(clusters_selected_genes$gene_id))} gene_ids y 
+{length(unique(clusters_selected_genes$gene_symbol))} gene_symbol. Se acercaron los valores de gene_symbol y gene_id.")
+clusters_selected_genes%>%group_by(gene_symbol)%>%summarise(n_prom=n())%>%summary()
+clusters_selected_genes%>%group_by(gene_id)%>%summarise(n_prom=n())%>%summary()
+clusters_selected_genes%>%group_by(gene_id)%>%summarise(n_prom=n())%>%
+  ggplot(aes(n_prom))+geom_histogram(binwidth = 1)
+```
+
+### Cluster width 
+
+Calculo el ancho de los clusters y veo su distribucion
+``` {r width}
+mcols(h37_tss_selected_gr)<-cbind(mcols(h37_tss_selected_gr), gene=str_remove_all(h37_tss_selected_gr$name,"(p.+@)|(,.+)"))
+
+# get cluster width
+mcols(h37_tss_selected_gr)<-cbind(mcols(h37_tss_selected_gr),width=width(h37_tss_selected_gr))
+clusters_selected_genes<-mcols(h37_tss_selected_gr)%>%as_tibble()%>%select(name,width)%>%left_join(clusters_selected_genes,.,by=c("cluster_id"="name"))
+
+##width distribution
+ggplot(clusters_selected_genes, aes(width))+geom_density()
+```
+
+### Calculo la distancia al promotor mas cercano dentro del mismo gen
+
+```{r dist_intra}
+gr_list_genes<-split(h37_tss_selected_gr, h37_tss_selected_gr$gene)
+dist_to_near_intra<-map(as.list(gr_list_genes),distanceToNearest)
+dist_df<-data.frame(
+  cluster_id=unlist(map2(as.list(gr_list_genes),dist_to_near_intra,~.x[queryHits(.y)]$name)),
+  nearest_id=unlist(map2(as.list(gr_list_genes),dist_to_near_intra,~.x[subjectHits(.y)]$name)),
+  distances=unlist(map(dist_to_near_intra, ~as_vector(mcols(.x)))))
+
+clusters_selected_genes<-left_join(clusters_selected_genes, dist_df, by=c("cluster_id"))
+
+ggplot(clusters_selected_genes, aes(distances))+geom_density()+scale_x_log10()
+```
+
+La cercanía entre los TSS clusters implica que no haya independencia en el efecto de los elementos asociados a cada promotor. Necesitamos una forma de unificar TSS asociados.
+
+# EPD database
+## <epd.vital-it.ch/EPDnew_select.php>
+
+Este analisis esta hecho en base al script EP_promoter_analysis.R
+El archivo con la totalidad de promotores está en All_promoters.bed
+
+```{r epd}
+epd_all_prom<-import.bed("Data/All_promoters.bed")
+mcols(epd_all_prom)$gene<-mcols(epd_all_prom)$name%>%str_remove("_.+")
+df_genes<-mcols(epd_all_prom)%>%as_tibble()%>%group_by(gene)%>%mutate(n_prom=n())
+```
+
+Hago un histograma de numero de promotores por gen
+```{r n_prom_epd}
+str_glue("De los {length(df_genes$gene%>%unique())} genes, hay  {df_genes%>%filter(n_prom>1)%>%select(gene)%>%distinct()%>%nrow()} genes con mas de un promotor")
+df_genes%>%select(-name, -score)%>%distinct()%>%ggplot(aes(n_prom))+geom_histogram(stat="count")
+df_genes%>%select(-name, -score)%>%distinct()%>%summary()
+```
+
+No veo outliers. Good \
+
+Calculo distancias intragenicas entre promotores
+
+```{r }
+epd_list_genes<-split(epd_all_prom, epd_all_prom$gene)
+dist_to_near_intra<-map(as.list(epd_list_genes),distanceToNearest)
+dist_epd<-data.frame(
+  cluster_id=unlist(map2(as.list(epd_list_genes),dist_to_near_intra,~.x[queryHits(.y)]$name)),
+  nearest_id=unlist(map2(as.list(epd_list_genes),dist_to_near_intra,~.x[subjectHits(.y)]$name)),
+  distances=unlist(map(dist_to_near_intra, ~as_vector(mcols(.x))))
+  )
+df_genes<-left_join(df_genes, dist_epd, by=c("name"="cluster_id"))
+df_genes%>%filter(n_prom>1)%>%group_by(gene)%>%summarise(mean_distance=mean(distances))%>%
+  ggplot( aes(mean_distance))+geom_density()+scale_x_log10()+geom_vline(xintercept = 100, linetype="dashed")
+```
+
+Si bien tiene grandes limitaciones esta base de datos, la puedo usar como exploratoria. 

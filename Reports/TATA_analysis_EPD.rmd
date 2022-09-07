@@ -1,0 +1,121 @@
+---
+title: "TATA analysis (EPD)"
+author: "Martin Iungman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message=F,warning=F,error=F)
+```
+
+```{r lib}
+library(JASPAR2020)
+library(TFBSTools)
+library(BSgenome.Hsapiens.UCSC.hg38)
+hg38<-BSgenome.Hsapiens.UCSC.hg38
+library(rtracklayer)
+library(tidyverse)
+epd_all_prom<-import.bed("Tables/epd_all_prom.bed")
+df_genes<-read_csv("Tables/df_epd.csv")
+```
+
+Este informe es un analisis exploratorio con la base de datos de EPD para evaluar la presencia de TATA box en los promotores. A su vez, se analiza si la proporción de promotores TATA, del total de promotores del gene, responde a una distribución al azar.   
+
+En primer lugar, armo promotores de 100 pares de abajo hacia rio arriba del TSS.\
+Elijo este ancho de búsqueda por tres razones: para un TSS en la posición 0, espero que un TATA funcional esté en el -30, por lo que no tiene sentido usar un promotor grande. A su vez, dada la distancia entre promotores alternativos, si tomo una distancia mas grande, puedo empezar a superponer promotores y por lo tanto contar el mismo TATA dos veces. Sin embargo, dado que esta base de datos junta TSS que se encuentran muy proximos, por lo que hay un TSS en la posición en 0, pero también puede haber en otras posiciones. Reducir el area de busqueda haría que pierda los TATA referidos a estos otros TSS.  
+
+Uso un score minimo de 80% para la busqueda de TATA en esa region. Me quedo con aquellos que esten en la misma hebra que el TSS referido.
+Y cuando hay mas de uno, selecciono el de mayor score. 
+```{r epd_proms}
+epd_down100_prom<-epd_all_prom%>%resize(100, fix="end")
+pfm_tbp <- getMatrixByName(JASPAR2020, "TBP")
+seqLogo(toICM(pfm_tbp))
+pwm_tbp<-toPWM(pfm_tbp, pseudocounts=0.8)
+dna_tbp<-getSeq(Hsapiens,epd_down100_prom)
+siteset<- searchSeq(pwm_tbp,dna_tbp, min.score="80%", strand="*")
+gff3_tata<-writeGFF3(siteset)
+tata_prom<-epd_down100_prom[as.numeric(unique(gff3_tata$seqname))]$name
+str_glue("Cantidad de promotores con TATA: {length(tata_prom)}. Cantidad de genes asociados: {epd_down100_prom[as.numeric(unique(gff3_tata$seqname))]$gene%>%unique()%>%length()}")
+df_genes<-cbind(df_genes, strand=as.vector(strand(epd_down100_prom)))
+df_genes<-df_genes%>%mutate(TATA=ifelse(name%in%tata_prom, T,F))
+df_genes_tata<-df_genes%>%filter(name%in%tata_prom)%>%cbind(pos=unique(gff3_tata$seqname))
+df_genes_tata%>%group_by(gene)%>%summarise(n_prom_tata=n())
+gff3_tata_ext<-gff3_tata%>%rename(strand_TATA=strand)%>%left_join(df_genes_tata, by=c("seqname"="pos"))%>%filter(strand_TATA==strand)%>%group_by(name)%>%filter(score.x==max(score.x))
+gff3_tata_ext<-gff3_tata_ext%>%mutate(start=100-start,end=100-end)
+``` 
+
+Ahora me fijo la posicion de los TATA. Deberian iniciar alrededor de la base -31
+```{r tata_pos}
+gff3_tata_ext%>%ggplot(aes(start))+geom_density()+xlim(0,100)+geom_vline(xintercept = 31,linetype="dashed")
+```
+ 
+Da divino, estan bien posicionadas
+
+Ahora me pregunto: Hay mayor proporcion de promotores TATA en promotores de genes con un unico promotor, o en promotores de genes con multiples promotores?  
+Hago tabla de contingencia, y hago un test de Fisher
+
+```{r test_TATA}
+df_genes<-df_genes%>%mutate(mult_prom=ifelse(n_prom>1,TRUE,FALSE))
+table(df_genes$mult_prom,df_genes$TATA)
+fisher.test(table(df_genes$mult_prom,df_genes$TATA))
+```
+
+Si bien da significativo... El Odds ratio es practicamente 1. No considero que haya relevancia biologica en esto  
+Lo veo mejor en grafico:  
+
+```{r mosaic}
+library(ggmosaic)
+df_genes%>%ggplot()+geom_mosaic(aes(x=product(TATA),fill=mult_prom))
+```
+
+### Auotocorrelacion de TATAs
+La pregunta es: es mas probable que, dado que hay una TATA en un promotor de un gen, haya otra TATA en el otro promotor?  
+Lo pense como una situacion de desequilibrio de Hardy Weinberg, donde hay dos alelos posibles (con y sin TATA). Limitación: solo puedo para genes con dos promotores, dado que serían los dos "cromosomas".
+
+```{r hw_tata}
+library(HardyWeinberg)
+df_genes<-df_genes%>%group_by(gene)%>%mutate(prop_TATA=sum(TATA)/n_prom)
+HWChisq(c(AA=df_genes%>%ungroup()%>%filter(n_prom==2,prop_TATA==0)%>%nrow()/2,
+          AB=df_genes%>%ungroup()%>%filter(n_prom==2,prop_TATA==0.5)%>%nrow()/2,
+          BB=df_genes%>%ungroup()%>%filter(n_prom==2,prop_TATA==1)%>%nrow()/2))
+```
+
+Da significativo.  
+La D es 0.5*(Het_obs - Het_esp). Dado que dio negativo, indica que hay que hay menos "heterocigotas" de lo esperado. Sin embargo, los efectos no son muy grandes. 
+
+Sigue faltando un modelo con mas de dos promotores...
+
+Una opcion es, siguiendo el concepto de HW, hacer test de bondad de ajuste, generando previamente la distribucion esperada.  
+Así como para dos promotores es p^2;2pq;q^2, siendo "p"=proporción de TATA y q=proporción sin TATA.... para tres promotores es p^3;3qp^2;3pq^2;q^3. De la misma manera, siguiendo la elaboracion del biomia de Newton para cualquier cantidad de promotores alternativos.  
+Lo malo de este analisis sería que va a ser uno para cada subpoblación de genes con N promotores alternativos, y ya vimos que no esperamos diferencia en presencia de TATAs en genes según su cantidad de promotores. 
+Resultados del mismo:
+
+```{r goodness_of_fit}
+TATA_modelo<-data.frame()
+for (n in 1:6) {
+  N=df_genes%>%filter(n_prom==n)%>%nrow()
+  p=df_genes%>%filter(n_prom==n,TATA==T)%>%nrow()/N
+  q=df_genes%>%filter(n_prom==n,TATA==F)%>%nrow()/N
+  for(k in 0:n){
+    vector<-c(n,N,N/n,k=k,esp=choose(n,k)*p^(n-k)*q^k,
+              obs=df_genes%>%filter(n_prom==n,prop_TATA==round(1-k/n,3))%>%nrow()/N,
+              obs_raw=df_genes%>%filter(n_prom==n,prop_TATA==round(1-k/n,3))%>%nrow()/n,
+              prop=k/n)
+    TATA_modelo<-rbind(TATA_modelo,vector)
+  }
+}
+names(TATA_modelo)<-c("n_prom","N_prom","N","k","esp","obs","obs_raw","prop_TATA")
+head(TATA_modelo)
+map(2:6, ~chisq.test(
+  TATA_modelo%>%filter(n_prom==.x)%>%select(obs_raw)%>%as_vector(), 
+  p=TATA_modelo%>%filter(n_prom==.x)%>%select(esp)%>%as_vector()))
+
+```
+
+Si bien da significativo para n_prom=2 y n_prom=3, no parece ser un efecto de gran magnitud. Veamos los valores de proporcion esperada vs observada  
+
+```{r tata_table}
+library(kableExtra)
+kable(TATA_modelo%>%filter(n_prom%in%c(2,3)))
+```
