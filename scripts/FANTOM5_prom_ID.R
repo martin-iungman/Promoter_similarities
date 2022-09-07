@@ -1,6 +1,9 @@
-library(rtracklayer)
-library(stringi)
-library(tidyverse)
+packages<-c("tidyverse","rtacklayer","stringi")
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+invisible(lapply(packages, library, character.only = TRUE))
 
 human_tss_gr <- import.bed("Data/TSS_human.bed") # importa un archivo bed y lo graba como GRanges
 gene_score_2p <- tibble(
@@ -8,7 +11,6 @@ gene_score_2p <- tibble(
   gene = stri_replace_last_regex(str = mcols(human_tss_gr)$name, pattern = ",\\d.\\d\\d\\d\\d", replacement = ""),
   score = as.numeric(stri_extract_last_regex(str = mcols(human_tss_gr)$name, pattern = "\\d.\\d\\d\\d\\d"))
 )
-#mcols(human_tss_gr)<-cbind(mcols(human_tss_gr), gene=gene_score_2p$gene)
 
 gene_score_2p <- filter(gene_score_2p, score >= 0.228)
 gene_names <- str_split(gene_score_2p$gene, ",") 
