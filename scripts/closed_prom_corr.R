@@ -18,20 +18,21 @@ my.cluster <- parallel::makeCluster(
 tissue_beds_ol<-tissue_beds_ol%>%map(~full_join(.x,clusters_selected_genes[,c(1,2)],by=c("name"="cluster_id"))%>%mutate(sum=replace_na(sum,0)))
 tissue_genes<-tissue_beds_ol%>%map(~.x%>%group_by(gene_symbol)%>%dplyr::summarise(gene_sum=sum(sum)))
 
-ggplot()+geom_density(data = tissue_genes[[1]],mapping=aes(gene_sum+0.9),col="blue")+
-  geom_density(data = tissue_genes[[2]],mapping=aes(gene_sum+0.9),col="red")+
-  geom_density(data = tissue_genes[[3]],mapping=aes(gene_sum+0.9),col="black")+
-  geom_density(data = tissue_genes[[4]],mapping=aes(gene_sum+0.9),col="green")+
-  geom_density(data = tissue_genes[[5]],mapping=aes(gene_sum+0.9),col="darkred")+
-  geom_density(data = tissue_genes[[6]],mapping=aes(gene_sum+0.9),col="darkred")+
-  geom_density(data = tissue_genes[[7]],mapping=aes(gene_sum+0.9),col="darkred")+
-  geom_density(data = tissue_genes[[8]],mapping=aes(gene_sum+0.9),col="darkred")+
-  scale_x_log10()
+#ggplot()+geom_density(data = tissue_genes[[1]],mapping=aes(gene_sum+0.9),col="blue")+
+#  geom_density(data = tissue_genes[[2]],mapping=aes(gene_sum+0.9),col="red")+
+#  geom_density(data = tissue_genes[[3]],mapping=aes(gene_sum+0.9),col="black")+
+#  geom_density(data = tissue_genes[[4]],mapping=aes(gene_sum+0.9),col="green")+
+#  geom_density(data = tissue_genes[[5]],mapping=aes(gene_sum+0.9),col="darkred")+
+#  geom_density(data = tissue_genes[[6]],mapping=aes(gene_sum+0.9),col="darkred")+
+#  geom_density(data = tissue_genes[[7]],mapping=aes(gene_sum+0.9),col="darkred")+
+#  geom_density(data = tissue_genes[[8]],mapping=aes(gene_sum+0.9),col="darkred")+
+#  scale_x_log10()
 
 #disribucion de los counts de los promotores
 
 tissue_beds_ol%>%map_dfr(~.x[sample(1:nrow(.x),size=10000),])%>%mutate(sum2=sample(sum))%>%
   ggplot(aes(log10(sum+sum2)))+geom_density()+xlim(0,4)
+ggsave("prom_activ_density.png")
 
 ###### deberia agrupar en listas los pares y nombrarlos como a los genes. Asi ya tengo facil para hacer otra ronda
 # prox_prom_list<-vector(mode="list",length=nrow(split_proximal)) #reemplazar el length a  nrow(proximal_promoters)
@@ -122,14 +123,16 @@ tissue_beds_ol%>%map_dfr(~.x[sample(1:nrow(.x),size=10000),])%>%mutate(sum2=samp
 split_proximal<-left_join(proximal_promoters,clusters_selected_genes[,c(1,2)],by=c("prom1"="cluster_id"))%>%distinct()%>%group_split(gene_symbol)
 names(split_proximal)<-map_chr(split_proximal,~unique(.x$gene_symbol) ) 
 
-prox_prom_list<-vector(mode="list",length=length(split_proximal)) #reemplazar el length a  nrow(proximal_promoters)
+prox_prom_list<-vector(mode="list",length=length(split_proximal)) 
 names(prox_prom_list)<-names(split_proximal)
+
 doParallel::registerDoParallel(cl = my.cluster)
 foreach::getDoParRegistered()
 foreach::getDoParWorkers()
-tic()
 
-prox_prom_list<-foreach(gene=1:100)%dopar%{
+print("Initiate pairwise correlations on the true dataset")
+tic()
+prox_prom_list<-foreach(gene=1:length(split_proximal))%dopar%{
   prox_prom_list[[gene]]<-vector(mode="list",length=nrow(split_proximal[[gene]]))
 
 for(k in 1:nrow(split_proximal[[gene]])){ 
@@ -158,6 +161,8 @@ toc()
 prox_prom_list<-compact(prox_prom_list)
 prox_prom_list%>%map(~map_dbl(.x,~.x$variance))%>%unlist()%>%as_data_frame()%>%filter(!is.na(value))%>%nrow()
 prox_prom_list%>%map(~map_dbl(.x,~.x$variance))%>%unlist()%>%as_data_frame()%>%filter(!is.na(value))%>%ggplot(aes(value))+geom_density()+scale_x_log10()
+ggsave("variance_density.png")
+writeRDS(prox_prom_list,"prox_prom_list.rds")
 
 ### PARA PERMUTACIONES. 
 #permuted_proximal_promoters<-arrange(proximal_promoters,)[1:length(flatten(prox_prom_list)),c(1,2)]
@@ -166,6 +171,7 @@ permuted_proximal_promoters<-data.frame(p1=map_chr(flatten(prox_prom_list),~.x$p
 prox_prom_perm<-vector(mode="list",length=nrow(permuted_proximal_promoters))
 doParallel::registerDoParallel(cl = my.cluster)
 
+print("Initiate pairwise correlations on the permuted dataset")
 tic()
 prox_prom_perm<-foreach(k=1:length(prox_prom_perm))%dopar%{
 #for(k in 1:length(prox_prom_perm)){
@@ -200,8 +206,10 @@ toc()
 prox_prom_perm<-compact(prox_prom_perm)
 prox_prom_perm%>%map_dbl(~.x$variance)%>%as_data_frame()%>%filter(!is.na(value))%>%nrow()
 prox_prom_perm%>%map_dbl(~.x$variance)%>%as_data_frame()%>%filter(!is.na(value))%>%ggplot(aes(value))+geom_density()+scale_x_log10()
-
+ggsave("variance_permuted_density.png")
+writeRDS(prox_prom_perm,"prox_prom_perm.rds")
 
 ggplot()+
   geom_density(data=prox_prom_list%>%map(~map_dbl(.x,~.x$variance))%>%unlist()%>%as_data_frame()%>%filter(!is.na(value)),mapping=aes(value))+
   geom_density(data=prox_prom_perm%>%map_dbl(~.x$variance)%>%as_data_frame()%>%filter(!is.na(value)),mapping=aes(value),col="blue")
+ggsave("variance_compared_density.png")
