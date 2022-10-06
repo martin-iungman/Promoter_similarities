@@ -1,8 +1,8 @@
-packages<-c("tidyverse","rtacklayer","stringi")
-installed_packages <- packages %in% rownames(installed.packages())
-if (any(installed_packages == FALSE)) {
-  install.packages(packages[!installed_packages])
-}
+packages<-c("rtracklayer","stringi","tidyverse")
+#installed_packages <- packages %in% rownames(installed.packages())
+#if (any(installed_packages == FALSE)) {
+#  install.packages(packages[!installed_packages])
+#}
 invisible(lapply(packages, library, character.only = TRUE))
 
 human_tss_gr <- import.bed("Data/TSS_human.bed") # importa un archivo bed y lo graba como GRanges
