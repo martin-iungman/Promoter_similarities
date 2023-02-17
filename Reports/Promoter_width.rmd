@@ -1,0 +1,379 @@
+---
+title: "Promoter Shape"
+author: "Martin Iungman"
+date: '2023-01-18'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=F, warning = F, error=F )
+```
+
+## Promoter Shape metrics Analysis
+
+
+```{r libraries, echo=F}
+library(plyranges)
+library(rtracklayer)
+library(tidyverse)
+#library(ggVennDiagram)
+```
+
+#### Sample selection
+
+I will work only with the samples with higher library size, after merging replicates.   
+Library sizes were already calculated, with the path of the corresponding bed file.   
+So Firstly I will calculate the final library size after merging replicate, and use as a first example one of the tissue with highest values, and later I will select the top 30 tissues to do the final analysis
+
+```{r lib_size}
+inputFiles = list.files("../Data/FANTOM5_files", full.names = T)
+library_size<-read_delim("../Data/library_size.txt",delim=" ", col_names=F)
+names(library_size)<-c("lib_size","file")
+sample_names<-gsub(".CNhs.+","",library_size$file)%>%gsub( "(_-_)|(,_)", "_", .)
+tissue<-gsub("(donor|pool|treated|rep|response).+","",sample_names)%>%gsub("_$","",.)%>%tolower()
+library_size$file<-paste0("../Data/FANTOM5_files/",library_size$file, ".gz")
+library_size_merged<-library_size%>%mutate(tissue=tissue)%>%group_by(tissue)%>%summarise(lib_size=sum(lib_size),samples=n())
+library_size_merged%>%arrange(desc(lib_size))%>%head()
+
+selected<-"mast_cell"
+```
+
+I choose the Mast cells samples, so I import them and do the merge.  The sum of the score is stored in the column named "score", while the ones from each separated sample are in columns "score_1", "score_2"....  
+
+
+```{r merge}
+bed_files<-purrr::map(library_size$file[which(tissue==selected)], ~rtracklayer::import(.x,format="bed"))
+u=unique(do.call("c",bed_files)) 
+mcols(u)=NULL
+for(k in 1:length(bed_files)){ 
+  mcols(u)[match(bed_files[[k]], u), paste0("score_",k)] = bed_files[[k]]$score
+  mcols(u)[[paste0("score_",k)]]<-replace_na( mcols(u)[[paste0("score_",k)]],0)
+}
+mcols(u)$score<-rowSums(mcols(u)%>%as.matrix()) 
+rm(bed_files)
+gc()
+```
+
+#### Promoter selection
+
+To get just the counts in the selected clusters, I keep just the positions overlapping with them  
+
+```{r overlap}
+prom_bed<-import.bed("../Tables/final_database.bed")
+mcols(prom_bed)<-mcols(prom_bed)%>%as_tibble()%>%select(name)
+intersect<-join_overlap_intersect(u,prom_bed)  #prom_bed no tiene ChrM?? y hay muestras que no tienen ChrY
+rm(u)
+gc()
+``` 
+
+Afterwards, I keep only the CTSS with activity over a certain threshold (10 counts). 
+Finally I separate de positions corresponding to each CTSS in a list (each CTSS is one list element)   
+
+```{r activity}
+activity<-read_rds("../Tables/true_tss_activ_tissue.rds")
+activity<-activity[[which(names(activity)==selected)]]
+ggplot(activity, aes(sum))+geom_density()+scale_x_log10()+geom_vline(xintercept=10, linetype="dashed")+xlab("Counts per CTSS")
+active_prom<-activity%>%filter(sum>10)%>%select(name)%>%as_vector()
+active_prom_raw<-subset(intersect, name%in%active_prom)
+list_prom<-group_split(as_tibble(active_prom_raw), name)
+names(list_prom)<-group_keys(as_tibble(active_prom_raw)%>%group_by(name))%>%as_vector()
+```
+
+#### Promoter Width
+
+The aim of this metric is to trim the positions with low activity in the extremes of the CTSS.  
+In order to do that I make a bilateral confidence interval for the median, using a custom alpha. This means that I keep just the central positions of the CTSS, accounting for the X% of the counts.  
+
+```{r width_function}
+calculate_width<-function(df,alpha){
+  df<-arrange(df, start)
+  df<-data.frame(cumsum=cumsum(df$score),pos=df$start)
+  suppressWarnings(low<-df$pos[max(which(df$cumsum<(alpha/2)*max(df$cumsum)))+1])
+  if(is.na(low)){low=min(df$pos)}
+  up<-df$pos[min(which(df$cumsum>(1-alpha/2)*max(df$cumsum)))]
+  width<-abs(up-low)+1
+  return(list(width=width,low=low,up=up))
+}
+```
+
+We can see the results for a specific gene:  
+
+```{r width_example}
+list_prom[[1]]%>%pivot_longer(cols = starts_with("score_"), names_to = "sample", values_to="score_sample", names_prefix = "score_")%>%
+  ggplot(aes(as.factor(start), score_sample, fill=sample))+geom_col(position = "stack")
+
+plot_width<-function(df, alpha, type=c("histogram", "cumsum"), name=NULL){
+  df<-arrange(df, start)
+  df_sum<-data.frame(cumsum=cumsum(df$score),pos=df$start)
+  suppressWarnings(low<-df_sum$pos[max(which(df_sum$cumsum<(alpha/2)*max(df_sum$cumsum)))+1])
+  if(is.na(low)){low=min(df_sum$pos)}
+  up<-df_sum$pos[min(which(df_sum$cumsum>(1-alpha/2)*max(df_sum$cumsum)))]
+  if(type=="histogram"){
+    plot<-ggplot(df, aes(start,score))+geom_col()+geom_vline(xintercept = c(up+0.5,low-0.5),linetype="dashed")+xlab("Position")+ylab("Counts")
+  }
+  if(type=="cumsum"){
+    plot<-df_sum%>%ggplot(aes(pos,cumsum))+geom_line()+geom_point()+geom_vline(xintercept = c(up,low),linetype="dashed")+xlab("Position")+ylab("Cumulated sum")
+  }
+  if(!is.null(name)){
+    plot<-plot+ggtitle(name, subtitle = paste0((1-alpha)*100, "% Confidence Interval"))
+  }
+  print(plot)
+}
+plot_width(list_prom[[1]], alpha=0.2, type="histogram", name=names(list_prom)[1])
+plot_width(list_prom[[1]], alpha=0.2, type="cumsum", name=names(list_prom)[1])
+```
+
+I apply the function to all the selected promoters, using different confidence intervals, to analize the effects  
+
+```{r all_width}
+width_ic50<-map_dbl(list_prom, ~calculate_width(.x,0.5)[["width"]])
+width_ic70<-map_dbl(list_prom, ~calculate_width(.x,0.3)[["width"]])
+width_ic80<-map_dbl(list_prom, ~calculate_width(.x,0.2)[["width"]])
+width_ic90<-map_dbl(list_prom, ~calculate_width(.x,0.1)[["width"]])
+width_ic95<-map_dbl(list_prom, ~calculate_width(.x,0.05)[["width"]])
+tibble(IC50=width_ic50, IC70=width_ic70,IC80=width_ic80, IC90=width_ic90, IC95=width_ic95)%>%pivot_longer(everything(),names_to = "IC",values_to="width")%>%
+  ggplot(aes(width, col=IC))+geom_density()+geom_vline(xintercept=15, linetype="dashed")
+```
+
+As expected, a shorter IC correlates with an enrichment in narrow promoters.  
+The dashed line is the threshold used by Sigalova et al to classify between Narrow and Broad promoters, after applying classification algorithms.  
+Hopefully is coherent with our results  
+Spearman correlation between the results using an IC50 and an IC95 (the major difference) is `r cor(width_ic50, width_ic95, method="spearman")`  
+
+
+#### Shape Index 
+
+Another possible measurement for Promoter shape is the "Shape Index" which is based on Information Theory (and thermodinamic entropy).  
+
+Its formula is $SI= 2 + \sum_{i=1}^{n}p_{(i)}*log_{2}(p_{(i)})$, being $p_{(i)}$ the probability of finding one count of the CTSS in the i-th position, and $n$ the number of positions.  
+This probability is equal to the relative number of counts in each position of the TSS.  
+A narrower promoter has a higher shape index  
+
+```{r shape_function}
+shape_index<-function(df){
+  tot_sum<-sum(df$score)
+  df$relscore<-df$score/tot_sum
+  return(2+sum(df$relscore*log2(df$relscore)))
+}
+```
+
+An important matter is that only non-zero positions are considered and the order of them is irrelevant.  
+So lets consider some differences between width and shape index:  
+
+```{r comparison_examples}
+df1<-data.frame(start=seq(1,10), score=c(1,2,1,8,17,5,1,3,8,1))
+plot_width(df1,alpha=0.2, type="histogram", name="Case 1")
+df2<-data.frame(start=seq(1,10), score=c(8,17,1,2,1,1,1,3,8,5))
+plot_width(df2,alpha=0.2, type="histogram", name="Case 2")
+```
+
+Between these two cases, I just reordered the scores. But we can see that promoter width (sensitive to position) varies a lot: from `r calculate_width(df1,alpha=0.2)[["width"]]` in Case 1 to `r calculate_width(df2,alpha=0.2)[["width"]]` in Case 2.    
+In the other hand, shape index kept the same value of `r shape_index(df1)` for both cases.  
+Now, in the case of zeros, they affect the promoter width (as seen in Case 3) in comparison to Case 1  
+
+```{r comparison_examples2}
+df3<-data.frame(start=c(1,3,5,6,7,8,11,12,14,15), score=c(1,2,1,8,17,5,1,3,8,1))
+plot_width(df3,alpha=0.2, type="histogram", name="Case 3")
+```
+
+But shape index is still the same `r shape_index(df3)`.  
+
+To reduce the "noise" from low values in the extremes of sharp promoters, we could restrict the promoter to an IC and the apply the promoter shape.  
+
+```{r shape_index_ic_function}
+shape_index_ic<-function(df,ic){
+  width_ic<-calculate_width(df,ic)
+  df_filt<-df%>%filter(start>=width_ic[["low"]],start<=width_ic[["up"]])
+  tot_sum<-sum(df_filt$score)
+  df_filt$relscore<-df_filt$score/tot_sum
+  si=sum(df_filt$relscore*log2(df_filt$relscore))+2
+  return(list(si=si, low=width_ic[["low"]], up=width_ic[["up"]]))
+}
+```
+
+Now, we see that shape index changed from `r shape_index(df1)` to`r shape_index_ic(df1, 0.2)[["si"]]`(a narrower promoter)  
+  
+When we analiyze the distrution of Shape Index in all selected promoters (both with the original data and with an IC90):  
+  
+```{r si}
+si<-map_dbl(list_prom, shape_index)
+si_ic90<-map_dbl(list_prom, ~shape_index_ic(.x,0.1)[["si"]])
+tibble(SI=si,SI_IC90=si_ic90)%>%ggplot()+geom_density(aes(SI, col="SI"))+geom_density(aes(SI_IC90, col="SI_IC90"))+xlab("Shape Index")+geom_vline(xintercept=(-1), linetype="dashed")
+```
+
+The dashed line is the threshold used by Hoskin et al (2011) to stablish diffferences between Narrow and Broad, in Drosophila (may not be the same in humans, though is coherent with the observed distribution).  
+
+Their Spearman correlation is as high as `r cor(si, si_ic90, method="spearman")`.
+
+#### Comparison between Shape Index and Promoter width
+
+Let's see how the two metrics are correlated in real data
+```{r corr1}
+si_ic50<-map_dbl(list_prom, ~shape_index_ic(.x,0.5)[["si"]])
+shape_summary<-tibble(name=names(list_prom),si,si_ic90, si_ic50, width_ic50, width_ic90)%>%
+  left_join(activity, by="name")
+ggplot(shape_summary, aes(width_ic90, si))+geom_point(size=.6)+xlab("IC90 Promoter Width")+xlab("Shape Index")
+```
+
+The first thing I notice is that appears to be a "forbidden" area in the plot. The reason for this is that shape index (as being a sum) is strongly dependent on the number of elements (positions) and has minimum values for each width (disregarding zeros). The maximum valueis always 2 (the second term in the formula won't ever be positive).  
+In the next plot we can see the minimum values for each width in the red line. This one is the case with lower information content: all the counts are equally distributed in along the N positions. But the number of elements considered by SI is frequently lower than the width due to zeros. 
+
+```{r si_min}
+min_shape<-function(x){2+x*((1/x)*log2(1/x))}
+min_si<-tibble(width=seq(1,100),SI_min=map_dbl(seq(1:100), min_shape))
+min_si%>%ggplot(aes(width, SI_min))+geom_line()+geom_point()
+ggplot(shape_summary, aes(width_ic90, si))+geom_point(size=.6)+geom_line(data=min_si, aes(width, SI_min), col="red")+xlab("IC90 Promoter Width")+ylab("Shape Index")
+ggplot(shape_summary, aes(width_ic90, si_ic90))+geom_point(size=.6)+geom_line(data=min_si, aes(width, SI_min), col="red")+xlab("IC90 Promoter Width")+ylab("Shape Index (IC90)")
+ggplot(shape_summary, aes(width_ic50, si_ic50))+geom_point(size=.6)+geom_line(data=min_si, aes(width, SI_min), col="red")+xlab("IC50 Promoter Width")+ylab("Shape Index (IC50)")+xlim(0,150)
+```
+
+On the other hand, both metrics of promoter shape appears to be well correlated (though not linearly). In fact, its Spearman correlation coefficient is `r cor(si, width_ic90, method="spearman")`. When we use the shape index that was previously trimmed for the IC90, the result is better but not much: `r cor(si_ic90, width_ic90, method="spearman")`. At a low IC (IC50) for both metrics, the correlation is lower: `r cor(si_ic50, width_ic50, method="spearman")`. 
+
+Promoter shape might have a strong association with promoter activity. Firstly, it is known that narrow promoter have frequently lower activity. But also it could be associated with the the imprecision of assuming a distribution pattern from low number of events. Maybe the latter cases can be identified as some of the ones that present opposite classification between the two metrics
+
+```{r shape_activity}
+shape_summary%>%ggplot(aes(width_ic90, si_ic90, col=sum<20))+geom_point(size=.7)+geom_line(data=min_si, aes(width, SI_min), col="red")+xlab("IC90 Promoter Width")+ylab("Shape Index (IC90)")+geom_vline(xintercept=15)+geom_hline(yintercept = -0.7)
+```
+
+We see that many of the cases with wide promoters but high SI have rather low number of counts and deviate from the tendency. Eliminating them could imply losing many narrow promoters (probably the ones with short width and high SI). Part of the difference is that promoters with low number of counts might have lots of zeros in the distribution. 
+
+I want to see the cases where classification would be different using either category. I set a preliminary threshold in 15 for Promoter width (IC90) and in -0.7 for Shape Index (IC90).
+
+```{r venn}
+width_narrow<-shape_summary$name[shape_summary$width_ic90<=15]
+width_broad<-shape_summary$name[shape_summary$width_ic90>15]
+si_narrow<-shape_summary$name[shape_summary$si_ic90>=(-.7)]
+si_broad<-shape_summary$name[shape_summary$si_ic90<(-.7)]
+#ggVennDiagram(list(width_narrow,si_narrow), category.names = c("Width IC90 (Narrow)", "Shape Index IC90 (Narrow)"))
+```
+
+Those that are not in the intersect, present opposite classification.
+How do they behave regarding their activity??
+
+```{r shape_activity_boxplot}
+shape_summary<-mutate(shape_summary, Classification=ifelse(name%in%intersect(width_narrow,si_narrow), "Narrow",ifelse(
+                                                           name%in%intersect(width_narrow,si_broad), "Narrow (W) + Broad (SI)",ifelse(
+                                                            name%in%intersect(width_broad,si_narrow),"Broad (W) + Narrow (SI)","Broad" 
+                                                           ))))
+ggplot(shape_summary, aes(as_factor(Classification),sum))+geom_violin()+scale_y_log10()
+shape_summary%>%group_by(Classification)%>%summarise(N=n())
+shape_summary%>%group_by(Classification, sum>20)%>%summarise(N=n())
+```
+
+<!-- However, to analyze if the group of genes with opposite classification, it might be better to omit those near the preliminary threshold. I will set as Narrow those with width IC90 <=10 or SI IC90 >(-0.5), and as Broad those with Width IC90 >20 or I IC90 <(1.5).  -->
+
+<!-- ```{r venn2} -->
+<!-- width_narrow<-shape_summary$name[shape_summary$width_ic90<=10] -->
+<!-- width_broad<-shape_summary$name[shape_summary$width_ic90>20] -->
+<!-- si_narrow<-shape_summary$name[shape_summary$si_ic90>=(-0.5)] -->
+<!-- si_broad<-shape_summary$name[shape_summary$si_ic90<(-1.5)] -->
+<!-- ggVennDiagram(list(width_narrow,si_narrow, width_broad, si_broad), category.names = c("Width IC90 (Narrow)", "Shape Index IC90 (Narrow)", "Width IC90 (Broad)", "Shape Index IC90 (Broad)")) -->
+<!-- ``` -->
+
+
+
+```{r activity_shape}
+shape_summary<-shape_summary%>%left_join(activity)
+ggplot(shape_summary, aes(sum, width_ic90))+geom_point(size=.7)+scale_x_log10()+geom_smooth()+ylab("CTSS width (IC90)")+xlab("CTSS counts")+ylim(0,max(width_ic90))
+ggplot(shape_summary, aes(sum, si_ic90))+geom_point(size=.7)+scale_x_log10()+geom_smooth()+ylab("Shape Index (IC90)")+xlab("CTSS counts")
+```
+
+Let's see the histogram for the promoters with the extreme values for each metric  
+```{r real_cases}
+order_ic90<-order(shape_summary$width_ic90)
+plot_width(list_prom[[order_ic90[2]]],alpha=0.1,name="Lowest Width IC90 (2nd)")
+plot_width(list_prom[[order_ic90[6]]],alpha=0.1,name="Lowest Width IC90 (6th)")
+plot_width(list_prom[[order_ic90[length(order_ic90)]]],alpha=0.1,name="Highest Width IC90 (1st)")
+plot_width(list_prom[[order_ic90[length(order_ic90)-1]]],alpha=0.1,name="Highest Width IC90 (2nd)")
+order_si90<-order(shape_summary$si_ic90)
+plot_width(list_prom[[order_si90[1]]],alpha=0.1,name="Lowest Shape Index IC90 (2nd)")
+plot_width(list_prom[[order_si90[length(order_si90)-30]]],alpha=0.1,name="Highest Shape Index IC90 (30th)")
+```
+
+
+
+
+### Other measures for Promoter Shape: Gini Coefficient
+
+Gini coefficient is an index used commonly in economy for countries unequality. It measures how the income of a country or region is distributed between its inhabitants.  
+Countries where a bunch of people concentrates a high percentage of the country's wealth, present Gini Coefficients close to 1; countries where money is distributed homogeneously among people present Gini coefficients close to 0.  
+Gini Coefficient is calculated as the area between the identity and the cumulative sum (or Lorenz  curve)  
+  
+<img title="Gini Coefficient" alt="Alt text" src="gini_example.png">
+
+Let's go back to promoters.  
+A broader promoter might present a more equal distribution of the counts among the positions, but a narrow one concentrates most of them in just one position (so the positions are people and counts are the money, in the analogy with country's income).  
+Here we can include the positions without any counts.  
+
+```{r gini_function}
+gini_coefficient <- function(x, weights=rep(1,length=length(x))){ ## copied form reldist package
+  ox <- order(x)
+  x <- x[ox]
+  weights <- weights[ox]/sum(weights)
+  p <- cumsum(weights)
+  nu <- cumsum(weights*x)
+  n <- length(nu)
+  nu <- nu / nu[n]
+  sum(nu[-1]*p[-n]) - sum(nu[-n]*p[-1])
+}
+
+calculate_gini<-function(df, include_zeros=F, alpha=NULL){
+  if(!is.null(alpha)){
+    width_ic<-calculate_width(df,alpha)
+    df<-df%>%filter(start>=width_ic[["low"]],start<=width_ic[["up"]])
+  }
+  if(include_zeros){
+    df<-tibble(start=seq(min(df$start), max(df$start)), score=0)%>%filter(!start%in%df$start)%>%rbind(df%>%select(start, score))
+  }
+  gini_coefficient(df$score)
+}
+```
+
+Let's see it in our dataset
+
+```{r gini}
+gini<-map_dbl(list_prom, calculate_gini)
+gini_zero<-map_dbl(list_prom,~calculate_gini(.x, include_zeros = T))
+gini_ic90<-map_dbl(list_prom,~calculate_gini(.x, alpha=0.1))
+gini_zero_ic90<-map_dbl(list_prom,~calculate_gini(.x, include_zeros = T, alpha=0.1))
+gini_zero_ic50<-map_dbl(list_prom,~calculate_gini(.x, include_zeros = T, alpha=0.5))
+gini_ic50<-map_dbl(list_prom,~calculate_gini(.x, alpha=0.5))
+
+shape_summary<-cbind(shape_summary, gini, gini_zero, gini_ic90, gini_zero_ic90, gini_ic50, gini_zero_ic50)
+ggplot(shape_summary)+geom_density(aes(gini, col="Gini"))+
+  geom_density(aes(gini_zero, col="Gini (with 0)"))+
+  geom_density(aes(gini_ic90, col="Gini (IC90)"))+
+  geom_density(aes(gini_zero_ic90, col="Gini (IC90 & with 0)"))
+```
+
+Some observations:  
+1- In any case there is a clear bimodal shape tendency, as we could see for the other metrics.  
+2- As expected, applying IC90 moves the curve towards more "equal" promoters, "broader", by omitting the extreme values with low counts). This appears to be opposite to what expected when applying the "width" metric with an IC90.  
+3- As expected, the the inclusion of "zeros" move the curves towards more "unequal" promoters, "sharper".  
+I think we have a problem here. If we are considering three positions and the counts are perfectly distributed between them, we wopuld consider it "broad" (even if it has only three positions). But if we consider very long tails with very low number of counts for these promoters, the result would be highly "sharp". Gini does not distinguish between promoters with different width.  
+Moreover, when using IC90, if the resulting width is 1bp, Gini index is lowest ("broader")  
+One option, is to consider for all the promoter the same length (for example, 100bp) and include all the positions, central in the main position. For the "alternative promoter" database I could do this, because CTSS are spaced by a minimum of 100bp between them.  
+We can also think a normalization method.  
+
+Let's see the cases with the lowest and highest values for the Gini coefficient. 
+```{r extreme_vals}
+kableExtra::kable(head(arrange(shape_summary,desc(gini_ic90))))
+plot_width(list_prom[[order(desc(gini_ic90))[1]]],alpha=0.1,name="Highest Gini IC90 (1st)")
+plot_width(list_prom[[order(desc(gini_ic90))[2]]],alpha=0.1,name="Highest Gini IC90 (2nd)")
+kableExtra::kable(head(arrange(shape_summary,gini_ic90)))
+plot_width(list_prom[[order(gini_ic90)[1]]],alpha=0.1,name="Lowest Gini IC90 (1st)")
+plot_width(list_prom[[order(gini_ic90)[5]]],alpha=0.1,name="Lowest Gini IC90 (5th)")
+```
+
+In the first cases we can see that Gini index with IC90 is better than Width with IC90.  
+With an IC50 the correlation between Width and Gini is much better, but results might be misleading: The IC might exclude parts of the true pick.  
+
+```{r corr}
+GGally::ggcorr(shape_summary%>%select_if(is.numeric),method=c("pairwise","spearman"))
+```
+
+The best correlations are between SI and Width.  
+Gini with zero does not associate with Gini without zeros.  
+Ginis don't associate well with width, though at IC50 the result is much better.  
+Ginis don't associate well with SI, though at IC50 and without zeros the result is much better.  
+

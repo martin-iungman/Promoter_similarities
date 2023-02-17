@@ -1,0 +1,128 @@
+---
+title: "Promoter Shape Metrics"
+author: "Martin Iungman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**The objective of this report is to understand several possible metrics for Promoter Shape.**  
+It's possible that some of them are just better than others for our purposes, but also some might give different information over TSS distribution so it might be valuable to measure many of them.  
+Moreover it's good to keep in mind that the suitability of the measure m ight be fully associated with the definition of promoter we do. Mainly, if we just use ranges from  a database (such as "True TSS") it's not the same as defining TSS clusters from raw data for the specific sample. For example, for the first case the metric must distinguish cases with multiple TSS clusters, whilst in the latter case this probably won't be an issue.  
+Besides, this metrics can be used for many other purposes, such as tissue specificity of some feature, or variability between bins of grouped information (as for splicing noise project). 
+
+Note: Many of the formulas are starting from i=0 in the reference bibliography. I rewrote them to start with i=1, for consistency with R language.  
+
+### Promoter Width
+
+The aim of this metric is to trim the positions with low activity in the extremes of the CTSS. It's the one used by Sigalova et al. for huamn and mouse data (2020)
+In order to do that I make a bilateral confidence interval for the median, using a custom alpha. This means that I keep just the central positions of the CTSS, accounting for the X% of the counts.  
+
+```{r width_function}
+calculate_width<-function(df,alpha){
+  df<-arrange(df, start)
+  df<-data.frame(cumsum=cumsum(df$score),pos=df$start)
+  suppressWarnings(low<-df$pos[max(which(df$cumsum<(alpha/2)*max(df$cumsum)))+1])
+  if(is.na(low)){low=min(df$pos)}
+  up<-df$pos[min(which(df$cumsum>(1-alpha/2)*max(df$cumsum)))]
+  width<-abs(up-low)+1
+  return(list(width=width,low=low,up=up))
+}
+```
+
+### Shape Index (Entropy)
+
+Another possible measurement for promoter shape is the "Shape Index" which basically the Shannon Entropy (Shannon, 1948). Firstly proposed for these by Hoskins et al (2011), and used widely for promoter shape, mainly in Drosophila data.  
+
+Its formula is $$SI= 2 + \sum_{i=1}^{n}p_{(i)}*log_{2}(p_{(i)})$$ being $p_{(i)}$ the probability of finding one count of the CTSS in the i-th position, and $n$ the number of positions.  
+This probability is equal to the relative number of counts in each position of the TSS.  
+A narrower promoter has a higher shape index  
+
+```{r entropy_function}
+shape_entropy<-function(df,norm=F,m=NULL){
+  tot_sum<-sum(df$score)
+  df$relscore<-df$score/tot_sum
+  shape_entropy=2+sum(df$relscore*log2(df$relscore))
+  if(norm){
+    if(is.null(m)){
+      m=abs(max(df$start)-min(df$start))}
+    shape_entropy=(-1/log(m))*sum(df$relscore*log(df$relscore))
+  }
+  return(shape_entropy)
+}
+```
+
+An important matter is that only non-zero positions are considered and the order of them is irrelevant. In the script above, zeros cases are not in the input, else it would give an Error. But it could be rewritten to account for zeros, being 0*ln(0)=0. In this case, as they are in a sum, won't affect the result. An alternative is to use pseudocounts for this positions.    
+Also, this metric is highly dependent on the number of positions considered. 
+[introducir grafico]
+
+A normalization of Shannon entropy could be also calculated (Blyth 1959), specially thought for cases where the number of elements is unknown. In the function it can be used with "norm=T". The number of positions is, by default, calculated as the range between the first position and the last one, but it also could be customized wit the parameter "m". Its formula is $$normEntropy=\frac{-1}{ln(m)}\sum_{i=1}^{n}p_{(i)}*ln(p_{(i)})$$
+Therefore, with the normalization, there's no longer any dependency over the number of positions considered, and zero-positions can be considered. The results go from 0 to 1.  
+
+### Extropy 
+
+Extropy is a measure much like the normalized Entropy, introduced by Lad et al (2015).  
+$$Extropy=\sum_{i=1}^{n}(1-p_{(i)})*ln(1-p_{(i)})$$
+$$normExtropy=\frac{-1}{(m-1)ln(\frac{m}{m-1})}\sum_{i=1}^{n}(1-p_{(i)})*ln(1-p_{(i)})$$
+The main difference is that uses 1-p instead of p. In consequence, avoids the problem with elements with zero counts. The only case where extropy can't be calculated is when, there's just one element with all the probabilities of success.  
+As normalized entropy, its range is [0,1] and permutations doesn't affects the result. 
+
+```{r extropy_function}
+shape_extropy<-function(df,norm=F,m=NULL){
+  tot_sum<-sum(df$score)
+  df$relscore<-df$score/tot_sum
+  shape_extropy=sum(df$relscore*log2(df$relscore))
+  if(norm){
+    if(is.null(m)){
+      m=abs(max(df$start)-min(df$start))}
+    shape_extropy=(-1/((m-1)*log(m/(m-1))))*sum(1-df$relscore*log(1-df$relscore))
+  }
+  return(shape_extropy)
+}
+```
+
+Weiss (2019), says that: "the extropy has rather stable values for varying m (see Figure 1a), whereas the entropy values change greatly".
+
+
+### Gini Index
+
+Gini coefficient is an index used commonly in economy for countries unequality. It measures how the income of a country or region is distributed between its inhabitants.  
+Countries where a bunch of people concentrates a high percentage of the country's wealth, present Gini Coefficients close to 1; countries where money is distributed homogeneously among people present Gini coefficients close to 0.  
+Gini Coefficient is calculated as the area between the identity and the cumulative sum (or Lorenz  curve)  
+  
+<img title="Gini Coefficient" alt="Alt text" src="gini_example.png">
+
+Let's go back to promoters.  
+A broader promoter might present a more equal distribution of the counts among the positions, but a narrow one concentrates most of them in just one position (so the positions are people and counts are the money, in the analogy with country's income).  
+Here we can include the positions without any counts.  
+
+```{r gini_function}
+gini_coefficient <- function(x, weights=rep(1,length=length(x))){ ## copied form reldist package
+  ox <- order(x)
+  x <- x[ox]
+  weights <- weights[ox]/sum(weights)
+  p <- cumsum(weights)
+  nu <- cumsum(weights*x)
+  n <- length(nu)
+  nu <- nu / nu[n]
+  sum(nu[-1]*p[-n]) - sum(nu[-n]*p[-1])
+}
+
+calculate_gini<-function(df, include_zeros=F, alpha=NULL){
+  if(!is.null(alpha)){
+    width_ic<-calculate_width(df,alpha)
+    df<-df%>%filter(start>=width_ic[["low"]],start<=width_ic[["up"]])
+  }
+  if(include_zeros){
+    df<-tibble(start=seq(min(df$start), max(df$start)), score=0)%>%filter(!start%in%df$start)%>%rbind(df%>%select(start, score))
+  }
+  gini_coefficient(df$score)
+}
+```
+
+Gini Index, doesn't present the "0*ln(0)" problem, and elements can be permuted without affecting the result (another nominal metric). 
+
+
