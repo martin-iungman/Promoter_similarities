@@ -3,12 +3,17 @@ title: "Promoter Shape Metrics"
 author: "Martin Iungman"
 date: "`r Sys.Date()`"
 output: html_document
+runtime: shiny
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r lib, echo=F,include=F}
+library(tidyverse)
+library(shiny)
+```
 **The objective of this report is to understand several possible metrics for Promoter Shape.**  
 It's possible that some of them are just better than others for our purposes, but also some might give different information over TSS distribution so it might be valuable to measure many of them.  
 Moreover it's good to keep in mind that the suitability of the measure m ight be fully associated with the definition of promoter we do. Mainly, if we just use ranges from  a database (such as "True TSS") it's not the same as defining TSS clusters from raw data for the specific sample. For example, for the first case the metric must distinguish cases with multiple TSS clusters, whilst in the latter case this probably won't be an issue.  
@@ -93,7 +98,7 @@ Gini coefficient is an index used commonly in economy for countries unequality. 
 Countries where a bunch of people concentrates a high percentage of the country's wealth, present Gini Coefficients close to 1; countries where money is distributed homogeneously among people present Gini coefficients close to 0.  
 Gini Coefficient is calculated as the area between the identity and the cumulative sum (or Lorenz  curve)  
   
-<img title="Gini Coefficient" alt="Alt text" src="gini_example.png">
+<img title="Gini Coefficient" alt="Alt text" src="imgs/gini_example.png">
 
 Let's go back to promoters.  
 A broader promoter might present a more equal distribution of the counts among the positions, but a narrow one concentrates most of them in just one position (so the positions are people and counts are the money, in the analogy with country's income).  
@@ -123,6 +128,26 @@ calculate_gini<-function(df, include_zeros=F, alpha=NULL){
 }
 ```
 
-Gini Index, doesn't present the "0*ln(0)" problem, and elements can be permuted without affecting the result (another nominal metric). 
+Gini Index, doesn't present the "0*ln(0)" problem, and elements can be permuted without affecting the result (its another nominal metric). 
+
+### Promoter shape for simulated promoters
+##### Binomial distributions 
+
+### Precision and accuracy 
+
+CAGE data, and consequently the observed TSS patterns, is a sample of the actual TSS (disregarding possible biases).  
+Taking each of the randomly generated binomial distributions as the true population of TSS for a promoter, I will take samples and assess the precision and accuracy of each one of the shape metrics.  
+Precision was assessed as a robust CV (the absolute value of Median Absolute Deviation divided the Median value).  
+Accuracy was assessed as the median of the absolute difference between the values from the samples and the population value.  
+
+```{r shiny_prom_indiv, echo = FALSE}
+shinyAppDir(
+  "../indiv_prom_shape_plot",
+  options = list(width = "100%", height = 700)
+)
+```
+
+
+
 
 

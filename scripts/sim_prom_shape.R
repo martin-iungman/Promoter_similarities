@@ -82,7 +82,7 @@ for(j in 1:nrow(params)){
   p=params[j,3]
 pop.vctr[[j]]=rbinom(counts, len, p=p)+1 #el +1 es porque el 0 esta incluido en la distribucion binomial
 pop.range=max(pop.vctr[[j]])-min(pop.vctr[[j]])
-hist(pop.vctr[[j]],breaks=seq(min(pop.vctr[[j]]),max(pop.vctr[[j]])))
+# hist(pop.vctr[[j]],breaks=seq(min(pop.vctr[[j]]),max(pop.vctr[[j]])))
 pop.df<-data.frame(table(pop.vctr[[j]]))
 names(pop.df)<-c("start","score")
 pop.df$start<-pop.df$start%>%as.integer()
@@ -93,8 +93,8 @@ pop.stats<-bind_rows(pop.stats,c(pop.entropy=shape_entropy(pop.df),pop.norm_entr
 counts.sample=perc.sample*counts
 sample.stats[[j]]<-get_stats_samples(pop.vctr[[j]],n.samples,counts.sample)%>%mutate(n.samples=n.samples,perc.sample=perc.sample, counts.sample=counts.sample)%>%bind_cols(pop.stats[j,])
 }
-sample.stats[[j]]%>%ggplot()+geom_density(aes(entropy,fill="entropy"))+geom_density(aes(norm_entropy,,fill="norm_entropy"))+
-  geom_density(aes(extropy,fill="extropy"))+geom_density(aes(norm_extropy, fill="norm_extropy"))+geom_density(aes(gini, fill="gini"))+xlab("Measure")
+# sample.stats[[j]]%>%ggplot()+geom_density(aes(entropy,fill="entropy"))+geom_density(aes(norm_entropy,,fill="norm_entropy"))+
+#   geom_density(aes(extropy,fill="extropy"))+geom_density(aes(norm_extropy, fill="norm_extropy"))+geom_density(aes(gini, fill="gini"))+xlab("Measure")
 sample.stats.sum<-map(sample.stats,~summarise(.x,counts=unique(counts),len=unique(len),p=unique(p),
                                               exact_entropy=unique(abs((median(entropy)-pop.entropy)/pop.entropy)),
                                               exact_norm_entropy=unique(abs((median(norm_entropy)-pop.norm_entropy)/pop.norm_entropy)),
@@ -102,4 +102,7 @@ sample.stats.sum<-map(sample.stats,~summarise(.x,counts=unique(counts),len=uniqu
                                               exact_norm_extropy=unique(abs((median(norm_extropy)-pop.norm_extropy)/pop.norm_extropy)),
                                               exact_gini=unique(abs((median(gini)-pop.gini)/pop.gini)),
                                               across(c("entropy","norm_entropy","extropy","norm_extropy","gini"),.fns=~abs((sd(.x)/mean(.x))))))%>%list_rbind()
+
+
+hist(c(rbinom(100, 20, 0.4),rbinom(30,50,0.5)))
 
