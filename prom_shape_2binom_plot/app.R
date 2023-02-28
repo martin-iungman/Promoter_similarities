@@ -1,27 +1,35 @@
 invisible(library(shiny))
 invisible(library(tidyverse))
-shape_entropy<-function(df,norm=F,m=NULL){
+shape_entropy<-function(df,norm=F,m=NULL,pseudocount=NULL){
+  if(!is.null(pseudocount)){
+    df<-tibble(start=seq(min(df$start), max(df$start)), score=pseudocount)%>%filter(!start%in%df$start)%>%rbind(df%>%select(start, score))
+  }
   tot_sum<-sum(df$score)
   df$relscore<-df$score/tot_sum
   shape_entropy=2+sum(df$relscore*log2(df$relscore))
   if(norm){
     if(is.null(m)){
-      m=abs(max(df$start)-min(df$start))+1}
+      m=abs(max(df$start)-min(df$start))}
     shape_entropy=(-1/log(m))*sum(df$relscore*log(df$relscore))
   }
   return(shape_entropy)
 }
-shape_extropy<-function(df,norm=F,m=NULL){
+
+shape_extropy<-function(df,include_zeros=F,norm=F,m=NULL){
+  if(include_zeros){
+    df<-tibble(start=seq(min(df$start), max(df$start)), score=0)%>%filter(!start%in%df$start)%>%rbind(df%>%select(start, score))
+  }
   tot_sum<-sum(df$score)
   df$relscore<-df$score/tot_sum
   shape_extropy=sum(df$relscore*log2(df$relscore))
   if(norm){
     if(is.null(m)){
-      m=abs(max(df$start)-min(df$start))+1}
-    shape_extropy=(-1/((m-1)*log(m/(m-1))))*sum((1-df$relscore)*log(1-df$relscore))
+      m=abs(max(df$start)-min(df$start))}
+    shape_extropy=(-1/((m-1)*log(m/(m-1))))*sum(1-df$relscore*log(1-df$relscore))
   }
   return(shape_extropy)
 }
+
 gini_coefficient <- function(x, weights=rep(1,length=length(x))){ ## copied form reldist package
   ox <- order(x)
   x <- x[ox]
@@ -32,6 +40,7 @@ gini_coefficient <- function(x, weights=rep(1,length=length(x))){ ## copied form
   nu <- nu / nu[n]
   sum(nu[-1]*p[-n]) - sum(nu[-n]*p[-1])
 }
+
 calculate_gini<-function(df, include_zeros=F, alpha=NULL){
   if(!is.null(alpha)){
     width_ic<-calculate_width(df,alpha)
@@ -172,7 +181,7 @@ server <- function(input, output) {
     summ_table<-data.frame(acc_entropy=accuracy(samples$entropy,pop$entropy),
                            acc_norm_entropy=accuracy(samples$norm_entropy,pop$norm_entropy),
                            acc_extropy=accuracy(samples$extropy,pop$extropy),
-                           acc_norm_entropy=accuracy(samples$norm_extropy,pop$norm_extropy),
+                           acc_norm_extropy=accuracy(samples$norm_extropy,pop$norm_extropy),
                            acc_gini=accuracy(samples$gini,pop$gini))
     
     return(summ_table)
